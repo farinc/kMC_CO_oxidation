@@ -2,10 +2,7 @@
 #$ -N kmc_co_ox
 #$ -cwd
 #$ -j y
-#$ -o logs/
 #$ -pe mpi 24
-
-mkdir -p logs
 
 module purge
 unset OMPI_MCA_btl

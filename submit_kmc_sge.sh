@@ -12,6 +12,7 @@ module load openmpi/4.1.2
 
 source .venv/bin/activate
 
+export OMPI_MCA_btl=self,vader,tcp
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 

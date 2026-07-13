@@ -25,4 +25,7 @@ source .venv/bin/activate
 
 module load openmpi/4.1.2
 
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+
 mpirun -np 1 python -m sweeps.mpi "$@"

@@ -1,0 +1,28 @@
+# Test output
+tests/outputs/
+
+# Graphify
+graphify-out/
+
+# AI tools
+.claude
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# Dist
+dist/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Ruff stuff:
+.ruff_cache/
+
+# Logs
+logs/

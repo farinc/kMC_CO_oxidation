@@ -15,7 +15,7 @@ from sweeps._common import (assemble, build_argparser, build_betas,
                             save_sweep_csv)
 
 
-def run_sweep(betas, params, seed, comm=None):
+def run_sweep(betas, params, seed, comm=None, delta_scale_beta=False):
     """Run every (beta, init) task round-robin across MPI ranks.
 
     Returns the {out}_kmc_sweep.csv dict on rank 0, None on every other rank
@@ -28,7 +28,8 @@ def run_sweep(betas, params, seed, comm=None):
 
     tasks = build_tasks(betas, seed)
     local_tasks = [t for t in tasks if t[0] % size == rank]
-    local_results = [run_task(task, params, verbose_prefix=f"[rank {rank}] ")
+    local_results = [run_task(task, params, delta_scale_beta=delta_scale_beta,
+                              verbose_prefix=f"[rank {rank}] ")
                      for task in local_tasks]
 
     gathered = comm.gather(local_results, root=0)
@@ -48,7 +49,8 @@ def main():
 
     params = params_from_args(args)
     betas = build_betas(args.beta_min, args.beta_max, args.beta_step)
-    sweep = run_sweep(betas, params, args.seed, comm=comm)
+    sweep = run_sweep(betas, params, args.seed, comm=comm,
+                      delta_scale_beta=args.delta_scale_beta)
 
     if rank == 0:
         save_sweep_csv(betas, sweep, args.L, f"{args.out}_kmc_sweep.csv")

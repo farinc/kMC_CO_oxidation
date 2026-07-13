@@ -15,4 +15,4 @@ source .venv/bin/activate
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 
-mpirun -np 1 python -m sweeps.mpi "$@"
+mpirun -np 24 python -m sweeps.mpi "$@"

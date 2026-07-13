@@ -12,10 +12,11 @@ from sweeps._common import (assemble, build_argparser, build_betas,
                             save_sweep_csv)
 
 
-def run_sweep(betas, params, seed):
+def run_sweep(betas, params, seed, delta_scale_beta=False):
     """Run every (beta, init) task serially. Returns the {out}_kmc_sweep.csv dict."""
     tasks = build_tasks(betas, seed)
-    results = [run_task(task, params) for task in tasks]
+    results = [run_task(task, params, delta_scale_beta=delta_scale_beta)
+              for task in tasks]
     return assemble(betas, results)
 
 
@@ -25,7 +26,8 @@ def main():
 
     params = params_from_args(args)
     betas = build_betas(args.beta_min, args.beta_max, args.beta_step)
-    sweep = run_sweep(betas, params, args.seed)
+    sweep = run_sweep(betas, params, args.seed,
+                      delta_scale_beta=args.delta_scale_beta)
 
     save_sweep_csv(betas, sweep, args.L, f"{args.out}_kmc_sweep.csv")
     print(f"Data written to '{args.out}_kmc_sweep.csv'.")

@@ -28,10 +28,15 @@ def build_tasks(betas, seed):
     return tasks
 
 
-def run_task(task, params, verbose_prefix=""):
-    """Run one (idx, beta, init, seed) task, returning (idx, tag, steady coverages)."""
+def run_task(task, params, delta_scale_beta=False, verbose_prefix=""):
+    """Run one (idx, beta, init, seed) task, returning (idx, tag, steady coverages).
+
+    delta_scale_beta ties the O2 desorption rate to the impingement rate,
+    delta = beta * 1e-4, instead of the fixed params.delta (0 by default).
+    """
     idx, beta, tag, seed = task
-    res = run_kmc(beta, init=tag, params=params, seed=seed)
+    overrides = {"delta": beta * 1e-4} if delta_scale_beta else {}
+    res = run_kmc(beta, init=tag, params=params, seed=seed, **overrides)
     note = " [absorbing state]" if res.stuck else ""
     print(f"{verbose_prefix}beta={beta:5.2f} init={tag:5s}  "
           f"theta_CO={res.steady_co:.3f} theta_O={res.steady_o:.3f}  "
@@ -68,6 +73,9 @@ def build_argparser(description):
     ap.add_argument("--khop-scale", type=float, default=1000.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--sample-interval", type=int, default=10_000)
+    ap.add_argument("--delta-scale-beta", action="store_true",
+                    help="O2 desorption rate delta = beta * 1e-4 per task, "
+                         "instead of the fixed delta=0 (irreversible O2 ads)")
     ap.add_argument("--out", default="co_oxidation", help="output file prefix")
     return ap
 

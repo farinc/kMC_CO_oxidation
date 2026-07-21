@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-import kmc_co_oxidation.kmc as kmc
-from tests.support import meanfield
+import co_oxidation.kmc as kmc
+from co_oxidation import meanfield
 
 R_GAS = kmc.R_GAS
 

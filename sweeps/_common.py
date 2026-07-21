@@ -10,7 +10,7 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from kmc_co_oxidation import KMCParams, run_kmc
+from co_oxidation import KMCParams, run_kmc
 
 TAGS = ("empty", "full")
 

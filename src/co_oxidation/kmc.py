@@ -40,6 +40,8 @@ mobile species and the other end is empty. The rate depends on which end
 the adsorbate sits on, and _classify works that out.
 """
 
+from .common import EMPTY, CO, O
+
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -47,7 +49,7 @@ from numba import njit
 
 R_GAS = 8.314462618  # J / mol / K
 
-EMPTY, CO, O = 0, 1, 2
+
 
 J_MAX = 12  # event slots per site
 

@@ -26,3 +26,9 @@ dist/
 
 # Logs
 logs/
+
+# Ouput
+output/
+
+# Scratchpad
+exploration/

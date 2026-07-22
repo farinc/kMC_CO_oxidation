@@ -14,11 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 mpi = [
-    "setuptools>=80",
-    "cython>=3",
     "mpi4py>=4.1.2",
-    "petsc4py>=3.25.3",
-    "slepc4py>=3.25.1",
+    "petsc4py==3.25.3",
+    "slepc4py==3.25.1",
 ]
 tt = [
     "scikit-tt",
@@ -49,15 +47,15 @@ me-mkm = { git = "https://github.com/farinc/me-mkm-tiling.git", branch = "main" 
 scikit-tt = { git = "https://github.com/PGelss/scikit_tt" }
 
 [tool.uv]
-# Do not allow uv to install its own native PETSc/SLEPc copies.
+# Suppress the PyPI packages that build complete native PETSc/SLEPc copies.
+# PETSC_DIR and SLEPC_DIR point to the cluster installations instead.
 override-dependencies = [
     "petsc ; sys_platform == 'never'",
     "slepc ; sys_platform == 'never'",
 ]
 
-# Build the wrappers inside the project environment so PETSC_DIR and
-# SLEPC_DIR refer to the cluster installations.
-no-build-isolation-package = [
-    "petsc4py",
-    "slepc4py",
+[tool.uv.extra-build-dependencies]
+# slepc4py needs the petsc4py .pxd headers during Cython compilation.
+slepc4py = [
+    "petsc4py==3.25.3",
 ]

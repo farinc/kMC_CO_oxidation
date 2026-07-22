@@ -14,12 +14,13 @@ Usage:
 from mpi4py import MPI
 
 from sweeps._common import (assemble, build_argparser, build_betas,
-                            build_tasks, build_tile, maybe_plot_coexistence,
+                            build_tasks, build_tile, delta_scale_of,
+                            maybe_plot_coexistence, maybe_plot_sweep,
                             params_from_args, run_coexistence, run_task,
                             save_coexistence_csv, save_sweep_csv)
 
 
-def run_sweep(betas, params, seed, comm=None, delta_scale_beta=False):
+def run_sweep(betas, params, seed, comm=None, delta_scale=0.0):
     """Run every kMC (beta, init) task round-robin across MPI ranks.
 
     Returns the {out}_kmc_sweep.csv dict on rank 0, None on every other rank
@@ -32,7 +33,7 @@ def run_sweep(betas, params, seed, comm=None, delta_scale_beta=False):
 
     tasks = build_tasks(betas, seed)
     local_tasks = [t for t in tasks if t[0] % size == rank]
-    local_results = [run_task(task, params, delta_scale_beta=delta_scale_beta,
+    local_results = [run_task(task, params, delta_scale=delta_scale,
                               verbose_prefix=f"[rank {rank}] ")
                      for task in local_tasks]
 
@@ -55,8 +56,8 @@ def main():
     betas = build_betas(args.beta_min, args.beta_max, args.beta_step)
 
     # Phase A: kMC, beta-parallel.
-    sweep = run_sweep(betas, params, args.seed, comm=comm,
-                      delta_scale_beta=args.delta_scale_beta)
+    dscale = delta_scale_of(args)
+    sweep = run_sweep(betas, params, args.seed, comm=comm, delta_scale=dscale)
 
     # Phase B: ME-MKM / SLEPc, flat collective per beta (all ranks in lockstep).
     if not args.no_coexistence:
@@ -73,8 +74,11 @@ def main():
                 maybe_plot_coexistence(cols, rows, arrays, betas, args.out)
 
     if rank == 0:
-        save_sweep_csv(betas, sweep, args.L, f"{args.out}_kmc_sweep.csv")
+        save_sweep_csv(betas, sweep, args.L, f"{args.out}_kmc_sweep.csv",
+                       delta_scale=dscale)
         print(f"Data written to '{args.out}_kmc_sweep.csv'.")
+        if args.plot:
+            maybe_plot_sweep(sweep, betas, args, dscale)
 
 
 if __name__ == "__main__":

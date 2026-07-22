@@ -14,12 +14,24 @@ from co_oxidation import KMCParams, run_kmc
 
 TAGS = ("empty", "full")
 
+# O2 desorption rate delta = DELTA_SCALE * beta when --delta-scale-beta is on
+# (the default). sweeps/plotting.py uses the same value for the mean-field
+# branches -- keep the two in step or the kMC points and the MF/Ea curves are
+# computed at different delta and stop being comparable.
+DELTA_SCALE = 1e-4
+
 # ME-MKM sweep columns added alongside the kMC coverages in {out}_kmc_sweep.csv.
 MEMKM_COLS = ("memkm_empty", "memkm_co", "memkm_o", "log_ratio")
 
 
 def build_betas(beta_min, beta_max, beta_step):
     return np.arange(beta_min, beta_max + 0.5 * beta_step, beta_step)
+
+
+def delta_scale_of(args):
+    """The single O2-desorption scale used by the kMC sweep, the ME-MKM model
+    and the mean-field branches: delta = delta_scale * beta."""
+    return args.delta_scale if args.delta_scale_beta else 0.0
 
 
 def build_tasks(betas, seed):
@@ -31,14 +43,15 @@ def build_tasks(betas, seed):
     return tasks
 
 
-def run_task(task, params, delta_scale_beta=False, verbose_prefix=""):
+def run_task(task, params, delta_scale=DELTA_SCALE, verbose_prefix=""):
     """Run one (idx, beta, init, seed) task, returning (idx, tag, steady coverages).
 
-    delta_scale_beta ties the O2 desorption rate to the impingement rate,
-    delta = beta * 1e-4, instead of the fixed params.delta (0 by default).
+    `delta_scale` ties the O2 desorption rate to the impingement rate,
+    delta = delta_scale * beta; 0.0 gives irreversible O2 adsorption. The same
+    value is handed to the ME-MKM model so both describe the same chemistry.
     """
     idx, beta, tag, seed = task
-    overrides = {"delta": beta * 1e-4} if delta_scale_beta else {}
+    overrides = {"delta": beta * delta_scale}
     res = run_kmc(beta, init=tag, params=params, seed=seed, **overrides)
     note = " [absorbing state]" if res.stuck else ""
     print(f"{verbose_prefix}beta={beta:5.2f} init={tag:5s}  "
@@ -59,8 +72,9 @@ def assemble(betas, results):
     return out
 
 
-def save_sweep_csv(betas, sweep, L, path):
-    df = pd.DataFrame({"beta": betas, "L": L, **sweep})
+def save_sweep_csv(betas, sweep, L, path, delta_scale=DELTA_SCALE):
+    df = pd.DataFrame({"beta": betas, "L": L, "delta_scale": delta_scale,
+                       **sweep})
     df.to_csv(path, index=False)
 
 
@@ -89,8 +103,8 @@ def run_coexistence(betas, tile, args, comm=None):
     rank = comm.Get_rank() if comm is not None else 0
     pipe = CoexistencePipeline(
         tile, comm=comm, order_species=args.order_species,
-        core_frac=args.core_frac, n_eigs_scan=args.n_eigs_scan,
-        factor=args.factor_solver)
+        core_frac=args.core_frac, factor=args.factor_solver,
+        delta_scale=delta_scale_of(args))
 
     n = len(betas)
     cols = {key: np.full(n, np.nan) for key in MEMKM_COLS}
@@ -148,9 +162,16 @@ def build_argparser(description):
     ap.add_argument("--khop-scale", type=float, default=1000.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--sample-interval", type=int, default=10_000)
-    ap.add_argument("--delta-scale-beta", action="store_true",
-                    help="O2 desorption rate delta = beta * 1e-4 per task, "
-                         "instead of the fixed delta=0 (irreversible O2 ads)")
+    ap.add_argument("--delta-scale", type=float, default=DELTA_SCALE,
+                    help="O2 desorption scale: delta = delta_scale * beta. "
+                         "Applied to the kMC sweep, the ME-MKM model and the "
+                         "mean-field branches alike")
+    ap.add_argument("--delta-scale-beta", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="O2 desorption rate delta = DELTA_SCALE * beta per "
+                         "task (default), matching the mean-field branches in "
+                         "sweeps.plotting. Pass --no-delta-scale-beta for the "
+                         "fixed delta=0 irreversible-O2 case")
     ap.add_argument("--out", default="co_oxidation", help="output file prefix")
 
     # ME-MKM coexistence phase
@@ -162,11 +183,15 @@ def build_argparser(description):
                     help="species whose coverage orients the slow eigenvector "
                          "(fixes which branch is 'basin A')")
     ap.add_argument("--core-frac", type=float, default=0.1,
-                    help="plateau fraction of the phi_2^L span defining basin cores")
-    ap.add_argument("--n-eigs-scan", type=int, default=6,
-                    help="left eigenpairs solved per beta during the sweep/Brent")
+                    help="coverage tolerance defining the committor's basin "
+                         "cores: a core is the states within core_frac of a "
+                         "full monolayer of its species (must be < 0.5). Keep "
+                         "it small: widening the cores pulls transition-region "
+                         "states into the basins and inflates the rates -- "
+                         "check (k_AB+k_BA)/|lambda_2| stays near 1")
     ap.add_argument("--n-eigs-report", type=int, default=20,
-                    help="left eigenpairs solved at each coexistence point")
+                    help="left eigenpairs solved at each coexistence point "
+                         "(the sweep/Brent inner loop needs no eigensolve)")
     ap.add_argument("--brent-xtol", type=float, default=1e-5,
                     help="Brent tolerance on (log-)beta for beta*")
     ap.add_argument("--factor-solver", default=None,
@@ -174,10 +199,31 @@ def build_argparser(description):
                          "pastix/petsc); default auto-selects the best available")
     ap.add_argument("--coexistence-out", default=None,
                     help="coexistence CSV path (default {out}_coexistence.csv)")
-    ap.add_argument("--plot", action="store_true",
-                    help="also render the ME-MKM spectral diagnostic figures "
-                         "at each beta* (needs the 'plot' extra; rank 0 only)")
+    ap.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True,
+                    help="render figures after the run (default): the "
+                         "bifurcation/rate plots from the sweep, plus the "
+                         "ME-MKM spectral diagnostics at each beta*. Rank 0 "
+                         "only; pass --no-plot to skip")
     return ap
+
+
+def maybe_plot_sweep(sweep, betas, args, delta_scale):
+    """Render the bifurcation + rate figures from the finished sweep, at the
+    delta the sweep actually used. Called on rank 0 only; a missing matplotlib
+    is a no-op with a note."""
+    try:
+        import pandas as pd
+        from sweeps.plotting import plot_sweep
+    except ImportError:
+        print("  [plot] matplotlib not installed; skipping sweep figures")
+        return
+    df = pd.DataFrame({"beta": betas, "L": args.L, **sweep}).dropna(
+        subset=["e_empty", "co_empty", "o_empty", "e_full", "co_full", "o_full"])
+    if df.empty:
+        print("  [plot] no complete kMC rows; skipping sweep figures")
+        return
+    for path in plot_sweep(df, args.out, delta_scale=delta_scale):
+        print(f"  [plot] wrote {path}")
 
 
 def maybe_plot_coexistence(cols, rows, arrays, betas, out_prefix):

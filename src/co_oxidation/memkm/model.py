@@ -1,7 +1,11 @@
 from me_mkm import BepInteraction, InitialStateInteraction, MEMKMBuilder, Reaction
 from ..common import EMPTY, CO, O
 
-def generate_model(beta, tile):
+def generate_model(beta, tile, delta_scale=1e-4):
+    """ME-MKM generator at one beta. `delta_scale` ties the O2 desorption rate
+    to the impingement rate, delta = delta_scale * beta; pass 0.0 for
+    irreversible O2 adsorption. Keep it equal to the kMC sweep's --delta-scale
+    so the two models describe the same chemistry."""
     temperature=500.0
     alpha = 1.6
     khop = 1000 * max(beta, alpha)
@@ -9,7 +13,7 @@ def generate_model(beta, tile):
         "alpha": alpha,
         "beta": beta,
         "gamma": 0.001,
-        "delta": beta * 1e-4,
+        "delta": delta_scale * beta,
         "kr": 1,
         "kh": khop,
     }

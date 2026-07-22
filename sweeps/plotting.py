@@ -24,19 +24,19 @@ from co_oxidation import meanfield
 
 sns.set_theme(style="whitegrid")
 
-DELTA_SCALE = 1e-4
+from sweeps._common import DELTA_SCALE   # keep sweep and plot at the same delta
 MODELS = ("mf", "ea")
 MODEL_LABELS = {"mf": "MF-MK", "ea": "Ea-MK"}
 MODEL_COLORS = {"mf": None, "ea": "green"}
 
-def branch_dataframe(betas_fine):
+def branch_dataframe(betas_fine, delta_scale=DELTA_SCALE):
     """Branches of both models in the shape plot.plot_bifurcation expects."""
     frames = []
     for model in MODELS:
         rows = {"stable_hi": [], "stable_lo": [], "unstable": []}
         for b in betas_fine:
             hi, lo, un = meanfield.branches(
-                [b], model=model, delta=b * DELTA_SCALE)
+                [b], model=model, delta=b * delta_scale)
             rows["stable_hi"].append(hi[0])
             rows["stable_lo"].append(lo[0])
             rows["unstable"].append(un[0])
@@ -50,13 +50,13 @@ def branch_dataframe(betas_fine):
     return pd.concat(frames, ignore_index=True)
 
 
-def rates_dataframe(beta, theta_o):
+def rates_dataframe(beta, theta_o, delta_scale=DELTA_SCALE):
     """Fig. 4 rate curves vs theta_CO at fixed beta and theta_O."""
     theta_co = np.linspace(1e-4, 1.0 - theta_o - 1e-4, 200)
     frames = []
     for model in MODELS:
         _, r_des_co, r_ads_o, r_oxi, _ = meanfield.rates(
-            theta_co, theta_o, beta, model=model, delta=beta * DELTA_SCALE)
+            theta_co, theta_o, beta, model=model, delta=beta * delta_scale)
         frames.append(pd.DataFrame({
             "model": model, "beta": beta, "theta_o": theta_o,
             "theta_co": theta_co, "r_oxi": r_oxi, "r_ads_o": r_ads_o,
@@ -189,7 +189,16 @@ def plot_coexistence(arrays, betas, log_ratios, out_prefix, tag=""):
         if np.dot(psi, phi2) < 0:
             psi = -psi
         psi = psi / np.max(np.abs(psi))
-        ax.plot(x, psi[state_order], lw=0.9, color=palette[m])
+        # Draw the two basins as separate segments so a basin holding only a
+        # handful of microstates (a line plot renders a single point as
+        # nothing) still shows up, via markers.
+        nA = len(idx_A)
+        for x_seg, psi_seg in ((x[:nA], psi[state_order][:nA]),
+                               (x[nA:], psi[state_order][nA:])):
+            if len(x_seg) == 0:
+                continue
+            ax.plot(x_seg, psi_seg, lw=0.9, color=palette[m],
+                    marker="o" if len(x_seg) < 20 else None, ms=4)
         ax.axhline(0.0, color="0.8", lw=0.8)
         ax.set_ylabel(rf"$\psi_{m + 1}^L$")
         label = rf"$\lambda_{m + 1}$ = {lam.real:.3e}"
@@ -300,7 +309,7 @@ def plot_coverage_map(arrays, out_prefix, tag=""):
     l = arrays["n_sites"]
     pop = arrays["cov_pop"]
     phi = arrays["cov_phi"]
-    qmap = arrays["cov_q_A"]   # q_A = 1 - q+ : P(reach the CO-rich core first)
+    qmap = arrays["cov_q"]     # standard TPT q+ : 0 on core A, 1 on core B
 
     deg = arrays["cov_deg"]
     a = np.arange(l + 1)
@@ -342,15 +351,31 @@ def plot_coverage_map(arrays, out_prefix, tag=""):
     im0 = _coverage_pcolor(axes[0], phi_m, l, "coolwarm", norm=phi_norm)
     axes[0].set_title(r"slow mode $\langle\phi_2^L\rangle_\pi$")
     fig.colorbar(im0, ax=axes[0], shrink=0.85)
+    sp_a = arrays.get("species_A", "A")
+    sp_b = arrays.get("species_B", "B")
     im1 = _coverage_pcolor(axes[1], q_m, l, "Blues", vmin=0.0, vmax=1.0)
-    axes[1].set_title(r"committor to CO-rich basin $\langle q_A\rangle_\pi$")
-    fig.colorbar(im1, ax=axes[1], label=r"$\langle q_A\rangle_\pi = 1-\langle q^+\rangle_\pi$",
-                 shrink=0.85)
+    axes[1].set_title(rf"forward committor $\langle q^+\rangle_\pi$  "
+                      rf"(0 = {sp_a}-core A, 1 = {sp_b}-core B)")
+    fig.colorbar(im1, ax=axes[1], label=r"$\langle q^+\rangle_\pi$", shrink=0.85)
     fig.suptitle(rf"Reaction coordinate in coverage space at "
                  rf"$\beta^*$ = {beta_star:.4g}")
     fig.savefig(f"{out_prefix}_coexistence{tag}_coverage-reaction.png",
                 dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_sweep(sweep, out_prefix, delta_scale=DELTA_SCALE, beta_fine_step=0.05,
+               rates_beta=4.0, rates_theta_o=0.01):
+    """Bifurcation + rate figures from a sweep dataframe, at the delta the
+    sweep actually used. Writes {out_prefix}_bifurcation.png and _rates.png."""
+    betas_fine = np.arange(sweep["beta"].min(),
+                           sweep["beta"].max() + 0.5 * beta_fine_step,
+                           beta_fine_step)
+    plot_bifurcation(branch_dataframe(betas_fine, delta_scale), sweep,
+                     f"{out_prefix}_bifurcation.png")
+    plot_rates(rates_dataframe(rates_beta, rates_theta_o, delta_scale),
+               f"{out_prefix}_rates.png")
+    return [f"{out_prefix}_bifurcation.png", f"{out_prefix}_rates.png"]
 
 
 def main():
@@ -373,17 +398,14 @@ def main():
     sweep = pd.read_csv(args.csv).dropna(subset=kmc_cols)
     stem = p.stem.replace("_kmc_sweep", "")
 
-    betas_fine = np.arange(sweep["beta"].min(),
-                           sweep["beta"].max() + 0.5 * args.beta_fine_step,
-                           args.beta_fine_step)
-    branches = branch_dataframe(betas_fine)
-
-    plot_bifurcation(branches, sweep, f"{dir}/{stem}_bifurcation.png")
-    print(f"wrote {stem}_bifurcation.png")
-
-    rates = rates_dataframe(args.rates_beta, args.rates_theta_o)
-    plot_rates(rates, f"{dir}/{stem}_rates.png")
-    print(f"wrote {stem}_rates.png")
+    # use the delta the sweep recorded, so the branches match its kMC points
+    delta_scale = (float(sweep["delta_scale"].iloc[0])
+                   if "delta_scale" in sweep.columns else DELTA_SCALE)
+    for path in plot_sweep(sweep, f"{dir}/{stem}", delta_scale=delta_scale,
+                           beta_fine_step=args.beta_fine_step,
+                           rates_beta=args.rates_beta,
+                           rates_theta_o=args.rates_theta_o):
+        print(f"wrote {Path(path).name}  (delta = {delta_scale:g} * beta)")
 
 if __name__ == "__main__":
     main()

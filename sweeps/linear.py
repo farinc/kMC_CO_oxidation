@@ -11,15 +11,17 @@ Usage:
 """
 
 from sweeps._common import (assemble, build_argparser, build_betas,
-                            build_tasks, build_tile, maybe_plot_coexistence,
-                            params_from_args, run_coexistence, run_task,
-                            save_coexistence_csv, save_sweep_csv)
+                            build_tasks, build_tile, delta_scale_of,
+                            maybe_plot_coexistence, maybe_plot_sweep,
+                            params_from_args,
+                            run_coexistence, run_task, save_coexistence_csv,
+                            save_sweep_csv)
 
 
-def run_sweep(betas, params, seed, delta_scale_beta=False):
+def run_sweep(betas, params, seed, delta_scale=0.0):
     """Run every (beta, init) task serially. Returns the {out}_kmc_sweep.csv dict."""
     tasks = build_tasks(betas, seed)
-    results = [run_task(task, params, delta_scale_beta=delta_scale_beta)
+    results = [run_task(task, params, delta_scale=delta_scale)
               for task in tasks]
     return assemble(betas, results)
 
@@ -30,8 +32,8 @@ def main():
 
     params = params_from_args(args)
     betas = build_betas(args.beta_min, args.beta_max, args.beta_step)
-    sweep = run_sweep(betas, params, args.seed,
-                      delta_scale_beta=args.delta_scale_beta)
+    dscale = delta_scale_of(args)
+    sweep = run_sweep(betas, params, args.seed, delta_scale=dscale)
 
     if not args.no_coexistence:
         tile = build_tile(args)
@@ -44,8 +46,12 @@ def main():
         if args.plot:
             maybe_plot_coexistence(cols, rows, arrays, betas, args.out)
 
-    save_sweep_csv(betas, sweep, args.L, f"{args.out}_kmc_sweep.csv")
+    save_sweep_csv(betas, sweep, args.L, f"{args.out}_kmc_sweep.csv",
+                   delta_scale=dscale)
     print(f"Data written to '{args.out}_kmc_sweep.csv'.")
+
+    if args.plot:
+        maybe_plot_sweep(sweep, betas, args, dscale)
 
 
 if __name__ == "__main__":

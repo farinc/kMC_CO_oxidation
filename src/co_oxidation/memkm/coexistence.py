@@ -2,22 +2,11 @@
 equal stationary weight, pi(A) = pi(B), then compute the basin-to-basin
 transition rates k(A->B), k(B->A) from committors.
 
-Basins are not hand-drawn coverage windows. At each beta the slow left
-eigenvector phi_2^L of W is computed (through SLEPc); it is near-constant on
-each metastable set and steps through the transition region, so splitting the
-states at the midpoint between its two plateau values recovers the dynamical
-basin membership directly (a spectral / PCCA-style split). Nothing about the
-split knows this is CO oxidation, which keeps the pipeline portable.
-
-The eigenvector's sign is arbitrary, so it is oriented to correlate positively
-with ORDER_SPECIES coverage under Theta -- this pins "basin A" to the same
-physical branch at every beta, making log10 pi(A)/pi(B) monotone in beta so a
-sign change brackets beta*, refined by Brent's method.
-
-This is the SLEPc/PETSc port of the former ``meta_stable.py``: every steady
-state, eigenvector and committor solve goes through :mod:`.backend`, so the
-whole pipeline runs distributed across MPI ranks and scales past what a serial
-scipy solve reaches.
+The committor's Dirichlet sets (the *cores*) are fixed by coverage core A is the
+states nearly saturated in ORDER_SPECIES, core B the states nearly saturated in 
+the other adsorbate. They are beta-independent, so they are built once per tile.
+`core_frac` is therefore a coverage tolerance (1 - core_frac of a full 
+monolayer), not a threshold in eigenvector units.
 """
 
 import numpy as np
@@ -33,21 +22,28 @@ _COVERAGE_NAMES = (("empty", EMPTY), ("co", CO), ("o", O))
 
 
 class CoexistencePipeline:
-    """Stateful driver over one tile: caches per-beta spectral results and the
-    (beta-independent) per-microstate coverage arrays so a sweep + Brent search
+    """Stateful driver over one tile: caches per-beta results and the
+    (beta-independent) coverage arrays and basin cores so a sweep + Brent search
     reuses work. Correct on a size-1 communicator (serial) and across ranks."""
 
     def __init__(self, tile, comm=None, order_species="CO", core_frac=0.1,
-                 sigma_scale=1e-8, n_eigs_scan=6, factor=None):
+                 sigma_scale=1e-8, factor=None, basin_species=None,
+                 delta_scale=1e-4):
+        if not 0.0 < core_frac < 0.5:
+            raise ValueError("core_frac must be in (0, 0.5) so the two cores "
+                             f"stay disjoint; got {core_frac}")
         self.tile = tile
         self.comm = comm
         self.order_species = order_species
+        self.basin_species = basin_species   # None -> auto-detect the other adsorbate
         self.core_frac = core_frac
         self.sigma_scale = sigma_scale
-        self.n_eigs_scan = n_eigs_scan
+        self.delta_scale = delta_scale   # delta = delta_scale * beta
         self.factor = factor
-        self._cache = {}       # beta -> lightweight numpy results (no PETSc objs)
+        self._cache = {}       # beta -> theta + committor (no PETSc objects)
+        self._spectral = {}    # (beta, k) -> eigenpairs
         self._cov_cache = {}   # species name -> per-microstate coverage array
+        self._cores = None     # (core_A, core_B), beta-independent
 
     # --- per-microstate coverage (depends only on the tile, cached once) ------
     def _species_coverage(self, builder, name):
@@ -59,62 +55,101 @@ class CoexistencePipeline:
             )
         return self._cov_cache[name]
 
-    # --- lightweight per-beta solve -------------------------------------------
-    def _slow(self, beta):
-        """Steady state + oriented slow left eigenvector at beta, cached.
+    def _other_species(self, builder):
+        """The adsorbate defining core B: the explicit `basin_species` if given,
+        else the single non-vacancy species that is not ORDER_SPECIES."""
+        if self.basin_species is not None:
+            return self.basin_species
+        others = [s for s in builder.species_names[1:] if s != self.order_species]
+        if len(others) != 1:
+            raise ValueError(
+                "cannot auto-pick the basin-B species from "
+                f"{builder.species_names}; pass basin_species explicitly")
+        return others[0]
 
-        Builds W, solves, then *destroys* the PETSc matrix and keeps only numpy
-        arrays, so a long Brent search never accumulates distributed matrices."""
+    def basin_cores(self, builder):
+        """Coverage-defined Dirichlet sets for the committor, cached.
+
+        core_A: nearly saturated in ORDER_SPECIES; core_B: nearly saturated in
+        the other adsorbate. Disjoint because the two coverages sum to <= 1 and
+        core_frac < 0.5; non-empty because the fully covered states exist."""
+        if self._cores is None:
+            hi = 1.0 - self.core_frac
+            cov_a = self._species_coverage(builder, self.order_species)
+            cov_b = self._species_coverage(builder, self._other_species(builder))
+            core_A, core_B = cov_a >= hi, cov_b >= hi
+            if not core_A.any() or not core_B.any():
+                raise ValueError(
+                    f"empty basin core at core_frac={self.core_frac} "
+                    f"(|A|={int(core_A.sum())}, |B|={int(core_B.sum())}); "
+                    "widen core_frac")
+            self._cores = (core_A, core_B)
+        return self._cores
+
+    # --- inner loop: stationary state + forward committor ---------------------
+    def _state(self, beta):
+        """Theta and the forward committor q+ at beta, cached.
+
+        No eigensolve: q+ comes from a Dirichlet solve on the coverage cores.
+        W is destroyed before returning so a long Brent search never
+        accumulates distributed matrices."""
         if beta in self._cache:
             return self._cache[beta]
-        builder = generate_model(beta=beta, tile=self.tile)
+        builder = generate_model(beta=beta, tile=self.tile,
+                                 delta_scale=self.delta_scale)
+        core_A, core_B = self.basin_cores(builder)
         W = backend.build_petsc_W(builder, self.comm)
         sigma = self.sigma_scale * backend.rate_scale(W)
         theta = backend.stationary(W, sigma, self.factor)
-        eigvals, phi = backend.left_eigenpairs(W, self.n_eigs_scan, sigma,
-                                               self.factor)
+        q_plus = backend.committor(W, core_A, core_B, self.factor)
         W.destroy()
+        res = dict(builder=builder, theta=theta, q_plus=q_plus, sigma=sigma,
+                   core_A=core_A, core_B=core_B)
+        self._cache[beta] = res
+        return res
 
-        lam2 = eigvals[1]
+    def slow_modes(self, beta, k):
+        """The k slowest left eigenpairs at beta plus the oriented phi_2^L.
+
+        Only needed for the diagnostics at beta*, never in the inner loop. The
+        eigenvector's sign is arbitrary, so it is oriented to correlate
+        positively with ORDER_SPECIES coverage under Theta."""
+        key = (beta, k)
+        if key in self._spectral:
+            return self._spectral[key]
+        s = self._state(beta)
+        builder, theta = s["builder"], s["theta"]
+        W = backend.build_petsc_W(builder, self.comm)
+        eigvals, phi = backend.left_eigenpairs(W, k, s["sigma"], self.factor)
+        W.destroy()
         phi2 = phi[:, 1].real
         cov = self._species_coverage(builder, self.order_species)
         covariance = theta @ (phi2 * cov) - (theta @ phi2) * (theta @ cov)
         if covariance < 0:
             phi2 = -phi2
-
-        res = dict(builder=builder, theta=theta, eigvals=eigvals,
-                   lam2=lam2, phi2=phi2, sigma=sigma)
-        self._cache[beta] = res
+        res = dict(eigvals=eigvals, phi_slow=phi, phi2=phi2, lam2=eigvals[1])
+        self._spectral[key] = res
         return res
 
-    # --- spectral basin split (static, on a phi_2^L array) --------------------
+    # --- basins: the q+ = 1/2 isocommittor surface -----------------------------
     @staticmethod
-    def _basin_split(phi2):
-        """Boolean masks (in_A, in_B) splitting ALL states at the midpoint
-        between the two plateau extremes of phi_2^L."""
-        threshold = 0.5 * (phi2.min() + phi2.max())
-        in_A = phi2 > threshold
-        return in_A, ~in_A
-
-    def _basin_cores(self, phi2):
-        """Basin *cores*: only states on the flat plateaus of phi_2^L, leaving
-        the transition region as committor interior."""
-        span = phi2.max() - phi2.min()
-        core_A = phi2 >= phi2.max() - self.core_frac * span
-        core_B = phi2 <= phi2.min() + self.core_frac * span
-        return core_A, core_B
+    def _basin_split(q_plus):
+        """Boolean masks (in_A, in_B) splitting ALL states at q+ = 1/2, the
+        transition-path-theory dividing surface."""
+        in_B = np.asarray(q_plus) > 0.5
+        return ~in_B, in_B
 
     # --- observables ----------------------------------------------------------
     def basin_log_ratio(self, beta):
-        s = self._slow(beta)
-        in_A, in_B = self._basin_split(s["phi2"])
+        s = self._state(beta)
+        in_A, in_B = self._basin_split(s["q_plus"])
         pi_A, pi_B = s["theta"][in_A].sum(), s["theta"][in_B].sum()
         return float(np.log10(pi_A / pi_B))
 
     def coverages(self, beta):
         """Mean fractional ME-MKM coverages (empty, CO, O) under Theta,
         directly comparable to the kMC steady coverages."""
-        s = self._slow(beta)
+        s = self._state(beta)
         builder, theta = s["builder"], s["theta"]
         out = {}
         for name, code in _COVERAGE_NAMES:
@@ -125,7 +160,7 @@ class CoexistencePipeline:
     def coverage_marginal(self, beta, species):
         """P(N_species): the stationary distribution marginalized onto one
         species' site count."""
-        s = self._slow(beta)
+        s = self._state(beta)
         builder, theta = s["builder"], s["theta"]
         code = builder.species_names.index(species)
         P = np.zeros(builder.l + 1)
@@ -138,12 +173,13 @@ class CoexistencePipeline:
 
             F    = sum_{i in A} pi_i (L q+)_i,   L = W^T (row convention),
             k_AB = F / <pi, q->,   k_BA = F / <pi, 1 - q->.
-        """
-        s = self._slow(beta)
-        builder, theta = s["builder"], s["theta"]
-        core_A, core_B = self._basin_cores(s["phi2"])
+
+        q+ is reused from the cached inner-loop solve; only the backward
+        committor and the reactive flux are computed here."""
+        s = self._state(beta)
+        builder, theta, q_plus = s["builder"], s["theta"], s["q_plus"]
+        core_A, core_B = s["core_A"], s["core_B"]
         W = backend.build_petsc_W(builder, self.comm)
-        q_plus = backend.committor(W, core_A, core_B, self.factor)
         q_minus = backend.committor_backward(W, core_A, core_B, theta,
                                              self.factor)
         F = backend.reactive_flux(W, theta, core_A, q_plus)
@@ -178,16 +214,16 @@ class CoexistencePipeline:
     def report(self, beta_star, n_eigs=20):
         """Full spectral + committor + TPT analysis at one beta*.
 
+        This is the only place the eigensolve runs, so lambda_2, the spectral
+        gap and the phi_2^L vs q+ collapse are available exactly as before.
+
         Returns (row, arrays): `row` is a flat dict (one {out}_coexistence.csv
         line); `arrays` holds the gathered eigenvectors/committor for plotting."""
-        s = self._slow(beta_star)
-        builder, theta, phi2 = s["builder"], s["theta"], s["phi2"]
-        lam2, sigma = s["lam2"], s["sigma"]
-
-        W = backend.build_petsc_W(builder, self.comm)
-        eigvals, phi_slow = backend.left_eigenpairs(W, n_eigs, sigma,
-                                                    self.factor)
-        W.destroy()
+        s = self._state(beta_star)
+        builder, theta = s["builder"], s["theta"]
+        m = self.slow_modes(beta_star, n_eigs)
+        eigvals, phi_slow, phi2, lam2 = (m["eigvals"], m["phi_slow"],
+                                         m["phi2"], m["lam2"])
         lam3 = eigvals[2]
 
         k_AB, k_BA, F, q_plus, q_minus = self.tpt_rates(beta_star)
@@ -216,34 +252,35 @@ class CoexistencePipeline:
             rate_sum_ratio=float((k_AB + k_BA) / abs(lam2.real)),
             r_squared=r_squared,
         )
-        in_A, in_B = self._basin_split(phi2)
-        cov_pop, cov_phi, cov_q_A, cov_deg = self._coverage_grids(
+        in_A, in_B = self._basin_split(q_plus)
+        cov_pop, cov_phi, cov_q, cov_deg = self._coverage_grids(
             builder, theta, phi2, q_plus)
-        arrays = dict(beta_star=float(beta_star), order_species=self.order_species,
+        arrays = dict(beta_star=float(beta_star),
+                      species_A=self.order_species,          # core A saturates this
+                      species_B=self._other_species(builder),  # core B saturates this
+                      order_species=self.order_species,
                       eigvals=eigvals, phi_slow=phi_slow, phi2=phi2,
                       theta=theta, q_plus=q_plus, in_A=in_A, in_B=in_B,
                       phi_coord=phi_coord, n_sites=builder.l,
-                      cov_pop=cov_pop, cov_phi=cov_phi, cov_q_A=cov_q_A,
+                      cov_pop=cov_pop, cov_phi=cov_phi, cov_q=cov_q,
                       cov_deg=cov_deg,
                       marginal=self.coverage_marginal(beta_star, self.order_species))
         return row, arrays
 
     @staticmethod
     def _coverage_grids(builder, theta, phi2, q_plus):
-        """Bin the stationary-weighted spectral quantities into the coverage
-        plane. Returns three (l+1, l+1) arrays indexed [N_species1, N_species2]
-        (for CO oxidation: [N_CO, N_O]):
+        """Bin the stationary-weighted quantities into the coverage plane.
+        Returns four (l+1, l+1) arrays indexed [N_species1, N_species2] (for CO
+        oxidation: [N_CO, N_O]):
 
           cov_pop[a, b] = sum_{i in class} pi_i               (population)
           cov_phi[a, b] = <phi_2^L>_pi over the class         (slow mode)
-          cov_q_A[a,b]  = <q_A>_pi over the class             (committor to A)
+          cov_q[a, b]   = <q+>_pi over the class              (committor)
           cov_deg[a, b] = number of microstates in the class  (degeneracy)
 
-        q_A = 1 - q+ is the probability of reaching basin A (the CO-rich core)
-        *before* basin B (the O-rich core) -- the complement of the TPT-
-        convention forward committor q+, which targets B. The TPT rate math
-        below still uses q+ itself; only the reported/plotted map is oriented
-        toward A, so "committor = 1" reads as "commits to the CO-rich side".
+        q+ is the standard TPT forward committor throughout: q+ = 0 on core A
+        (saturated in ORDER_SPECIES) and q+ = 1 on core B (saturated in the
+        other adsorbate), i.e. the probability of reaching B before A.
 
         phi/q are NaN where the class carries no stationary weight; degeneracy
         lets a caller form the per-microstate mean weight cov_pop / cov_deg,
@@ -251,9 +288,9 @@ class CoexistencePipeline:
         l = builder.l
         cov_pop = np.zeros((l + 1, l + 1))
         cov_phi = np.full((l + 1, l + 1), np.nan)
-        cov_q_A = np.full((l + 1, l + 1), np.nan)
+        cov_q = np.full((l + 1, l + 1), np.nan)
         cov_deg = np.zeros((l + 1, l + 1))
-        q_A = 1.0 - np.asarray(q_plus)          # orient toward the CO-rich core
+        q_plus = np.asarray(q_plus)
         for counts, idxs in coverage_classes(builder):
             a, b = int(counts[0]), int(counts[1])
             w = theta[idxs].sum()
@@ -261,5 +298,5 @@ class CoexistencePipeline:
             cov_deg[a, b] = len(idxs)
             if w > 0.0:
                 cov_phi[a, b] = (theta[idxs] * phi2[idxs]).sum() / w
-                cov_q_A[a, b] = (theta[idxs] * q_A[idxs]).sum() / w
-        return cov_pop, cov_phi, cov_q_A, cov_deg
+                cov_q[a, b] = (theta[idxs] * q_plus[idxs]).sum() / w
+        return cov_pop, cov_phi, cov_q, cov_deg

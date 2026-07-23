@@ -15,7 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 mpi = [
     "mpi4py>=4.1.2",
+    "petsc==3.25.3",
     "petsc4py==3.25.3",
+    "slepc==3.25.1",
     "slepc4py==3.25.1",
 ]
 tt = [
@@ -46,16 +48,6 @@ testpaths = ["tests"]
 me-mkm = { git = "https://github.com/farinc/me-mkm-tiling.git", branch = "main" }
 scikit-tt = { git = "https://github.com/PGelss/scikit_tt" }
 
-[tool.uv]
-# Suppress the PyPI packages that build complete native PETSc/SLEPc copies.
-# PETSC_DIR and SLEPC_DIR point to the cluster installations instead.
-override-dependencies = [
-    "petsc ; sys_platform == 'never'",
-    "slepc ; sys_platform == 'never'",
-]
-
-[tool.uv.extra-build-dependencies]
-# slepc4py needs the petsc4py .pxd headers during Cython compilation.
-slepc4py = [
-    "petsc4py==3.25.3",
-]
+[tool.uv.extra-build-variables]
+petsc = { PETSC_CONFIGURE_OPTIONS = "--with-scalar-type=real --with-64-bit-indices=0 --download-openblas --download-metis --download-parmetis --download-scalapack --download-mumps --download-hypre --download-superlu_dist COPTFLAGS='-O3 -march=haswell -mtune=haswell' CXXOPTFLAGS='-O3 -march=haswell -mtune=haswell' FOPTFLAGS='-O3 -march=haswell -mtune=haswell'" }
+slepc = { SLEPC_CONFIGURE_OPTIONS = "--download-arpack --download-primme" }

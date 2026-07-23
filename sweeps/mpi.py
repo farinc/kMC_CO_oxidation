@@ -10,12 +10,13 @@ The ME-MKM / SLEPc coexistence analysis runs together with all ranks cooperating
 on each beta's distributed generator. It goes one beta at a time so the Brent search
 for beta* stays in lockstep across ranks. 
 
-Phase C: 
+Phase C:
 The mean-field branches are computed serially on rank 0. Rank 0 writes {out}_kmc_sweep.csv,
 {out}_coexistence.csv and {out}_meanfield.csv. Each phase can be turned off
-with --no-kmc / --no-memkm / --no-meanfield. Requires the `native-petsc` +
-`native-slepc` or `source-petsc` + `source-slepc` extras (that is mpi4py,
-petsc4py, and slepc4py).
+with --no-kmc / --no-memkm / --no-meanfield (ME-MKM is on by default here,
+unlike sweeps/linear.py). Requires the `native-petsc` + `native-slepc` or
+`source-petsc` + `source-slepc` extras (that is mpi4py, petsc4py, and
+slepc4py).
 
 Usage:
     mpirun -np 4 uv run python -m sweeps.mpi --memkm-sites 8 --out case1
@@ -77,7 +78,7 @@ def main():
                           delta_scale=dscale)
 
     # Phase B: ME-MKM / SLEPc, flat collective per beta (all ranks in lockstep).
-    if not args.no_memkm:
+    if args.memkm:
         if rank == 0:
             print("ME-MKM / SLEPc coexistence phase")
         tile = build_tile(args)

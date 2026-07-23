@@ -105,10 +105,12 @@ class CoexistencePipeline:
                                  delta_scale=self.delta_scale, **self.physics)
         core_A, core_B = self.basin_cores(builder)
         W = backend.build_petsc_W(builder, self.comm)
-        sigma = self.sigma_scale * backend.rate_scale(W)
-        theta = backend.stationary(W, sigma, self.factor)
-        q_plus = backend.committor(W, core_A, core_B, self.factor)
-        W.destroy()
+        try:
+            sigma = self.sigma_scale * backend.rate_scale(W)
+            theta = backend.stationary(W, sigma, self.factor)
+            q_plus = backend.committor(W, core_A, core_B, self.factor)
+        finally:
+            W.destroy()
         res = dict(builder=builder, theta=theta, q_plus=q_plus, sigma=sigma,
                    core_A=core_A, core_B=core_B)
         self._cache[beta] = res
@@ -126,8 +128,10 @@ class CoexistencePipeline:
         s = self._state(beta)
         builder, theta = s["builder"], s["theta"]
         W = backend.build_petsc_W(builder, self.comm)
-        eigvals, phi = backend.left_eigenpairs(W, k, s["sigma"], self.factor)
-        W.destroy()
+        try:
+            eigvals, phi = backend.left_eigenpairs(W, k, s["sigma"], self.factor)
+        finally:
+            W.destroy()
         phi2 = phi[:, 1].real
         cov = self._species_coverage(builder, self.order_species)
         covariance = theta @ (phi2 * cov) - (theta @ phi2) * (theta @ cov)
@@ -186,10 +190,12 @@ class CoexistencePipeline:
         builder, theta, q_plus = s["builder"], s["theta"], s["q_plus"]
         core_A, core_B = s["core_A"], s["core_B"]
         W = backend.build_petsc_W(builder, self.comm)
-        q_minus = backend.committor_backward(W, core_A, core_B, theta,
-                                             self.factor)
-        F = backend.reactive_flux(W, theta, core_A, q_plus)
-        W.destroy()
+        try:
+            q_minus = backend.committor_backward(W, core_A, core_B, theta,
+                                                 self.factor)
+            F = backend.reactive_flux(W, theta, core_A, q_plus)
+        finally:
+            W.destroy()
         m_A = float(theta @ q_minus)          # P(currently "coming from A")
         m_B = float(theta @ (1.0 - q_minus))  # P(currently "coming from B")
         return F / m_A, F / m_B, F, q_plus, q_minus

@@ -1,16 +1,19 @@
 """
-Serial beta sweep: runs the kMC cases, the matching ME-MKM / SLEPc coexistence
-analysis and the mean-field branches on a single core, writing
-{out}_kmc_sweep.csv (kMC + ME-MKM coverages and the basin log-ratio),
-{out}_coexistence.csv (the transition rates at each coexistence point beta*)
-and {out}_meanfield.csv (the MF-MK / Ea-MK branches). Each phase can be turned
-off independently with --no-kmc / --no-memkm / --no-meanfield.
+Serial beta sweep: runs the kMC cases, the mean-field branches, and (opt-in)
+the ME-MKM / SLEPc coexistence analysis on a single core, writing
+{out}_kmc_sweep.csv (kMC coverages, plus the ME-MKM columns if --memkm is on),
+{out}_coexistence.csv (only with --memkm: transition rates at each beta*) and
+{out}_meanfield.csv (the MF-MK / Ea-MK branches). Each phase can be toggled
+independently with --no-kmc / --memkm / --no-meanfield.
+
+The ME-MKM phase is off by default here: even a small tile is too slow for a
+laptop-run sweep. sweeps/mpi.py enables it by default since that's meant to run on a cluster.
 
 Usage:
     uv run python -m sweeps.linear
-    uv run python -m sweeps.linear --kmc-L 24 --memkm-sites 8 --out case1
-    uv run python -m sweeps.linear --no-memkm                 # kMC + mean field
-    uv run python -m sweeps.linear --no-kmc --no-memkm        # mean field only
+    uv run python -m sweeps.linear --kmc-L 24 --out case1
+    uv run python -m sweeps.linear --memkm --memkm-sites 8     # + ME-MKM/SLEPc
+    uv run python -m sweeps.linear --no-kmc --memkm            # ME-MKM only
 """
 
 from sweeps._common import (assemble, build_argparser, build_betas,
@@ -31,7 +34,7 @@ def run_sweep(betas, params, seed, delta_scale=0.0):
 
 
 def main():
-    ap = build_argparser(__doc__.splitlines()[1])
+    ap = build_argparser(__doc__.splitlines()[1], memkm_default=False)
     args, _ = ap.parse_known_args()          # let any PETSc/SLEPc options pass
 
     params = params_from_args(args)
@@ -44,8 +47,8 @@ def main():
     else:
         sweep = run_sweep(betas, params, args.kmc_seed, delta_scale=dscale)
 
-    # Phase B: ME-MKM / SLEPc coexistence.
-    if not args.no_memkm:
+    # Phase B: ME-MKM / SLEPc coexistence (off by default, see --memkm).
+    if args.memkm:
         tile = build_tile(args)
         print("ME-MKM / SLEPc coexistence phase")
         cols, rows, arrays = run_coexistence(betas, tile, args, comm=None)

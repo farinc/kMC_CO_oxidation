@@ -1,7 +1,8 @@
 """Shared task list, single-task runner and CSV writer for the beta sweeps.
 A sweep runs up to three independent phases, each toggleable from the CLI:
   - kMC          : the (beta, init) trajectories        (--no-kmc to skip)
-  - ME-MKM       : the SLEPc/PETSc coexistence analysis  (--no-memkm to skip)
+  - ME-MKM       : the SLEPc/PETSc coexistence analysis  (--memkm/--no-memkm;
+                   default is per-entry-point, see build_argparser)
   - mean field   : the MF-MK / Ea-MK steady-state branches (--no-meanfield)
 """
 
@@ -226,7 +227,7 @@ def save_coexistence_csv(rows, path):
     return True
 
 
-def build_argparser(description):
+def build_argparser(description, memkm_default=True):
     ap = argparse.ArgumentParser(description=description)
 
     # Shared sweep controls (physics + book-keeping common to every phase).
@@ -270,10 +271,15 @@ def build_argparser(description):
     phases = ap.add_argument_group("phase toggles")
     phases.add_argument("--no-kmc", action="store_true",
                         help="skip the kMC sweep (its coverage columns stay NaN)")
-    phases.add_argument("--no-memkm", "--no-coexistence", dest="no_memkm",
-                        action="store_true",
-                        help="skip the ME-MKM / SLEPc coexistence phase "
-                             "(--no-coexistence is a deprecated alias)")
+    phases.add_argument("--memkm", "--coexistence", dest="memkm",
+                        action=argparse.BooleanOptionalAction,
+                        default=memkm_default,
+                        help="ME-MKM / SLEPc coexistence phase, needs the "
+                             "native-petsc+native-slepc or "
+                             "source-petsc+source-slepc extras "
+                             f"(default: {'on' if memkm_default else 'off'} "
+                             "for this sweep). --no-coexistence is a "
+                             "deprecated alias for --no-memkm")
     phases.add_argument("--no-meanfield", action="store_true",
                         help="skip the MF-MK / Ea-MK mean-field branch phase "
                              "(no {out}_meanfield.csv, no bifurcation/rate lines)")

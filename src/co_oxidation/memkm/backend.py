@@ -39,32 +39,35 @@ def _probe_factor(comm):
     """First LU solver in _FACTOR_PREFERENCE that can actually factor a matrix
     on `comm`, tested by symbolically setting up a 2x2 identity."""
     T = PETSc.Mat().create(comm=comm)
-    T.setSizes(((PETSc.DECIDE, 2), (PETSc.DECIDE, 2)))
-    T.setType("aij")
-    T.setUp()
-    lo, hi = T.getOwnershipRange()
-    for i in range(lo, hi):
-        T.setValue(i, i, 1.0)
-    T.assemble()
-    chosen = "petsc"
-    for st in _FACTOR_PREFERENCE:
-        if st == "petsc":
-            break
-        ksp = PETSc.KSP().create(comm=comm)
-        ksp.setOperators(T)
-        ksp.setType("preonly")
-        pc = ksp.getPC()
-        pc.setType("lu")
-        pc.setFactorSolverType(st)
-        try:
-            pc.setUp()          # triggers MatGetFactor; raises if unavailable
-            ksp.destroy()
-            chosen = st
-            break
-        except PETSc.Error:
-            ksp.destroy()
-    T.destroy()
-    return chosen
+    try:
+        T.setSizes(((PETSc.DECIDE, 2), (PETSc.DECIDE, 2)))
+        T.setType("aij")
+        T.setUp()
+        lo, hi = T.getOwnershipRange()
+        for i in range(lo, hi):
+            T.setValue(i, i, 1.0)
+        T.assemble()
+        chosen = "petsc"
+        for st in _FACTOR_PREFERENCE:
+            if st == "petsc":
+                break
+            ksp = PETSc.KSP().create(comm=comm)
+            try:
+                ksp.setOperators(T)
+                ksp.setType("preonly")
+                pc = ksp.getPC()
+                pc.setType("lu")
+                pc.setFactorSolverType(st)
+                pc.setUp()          # triggers MatGetFactor; raises if unavailable
+                chosen = st
+                break
+            except PETSc.Error:
+                pass
+            finally:
+                ksp.destroy()
+        return chosen
+    finally:
+        T.destroy()
 
 
 def choose_factor(A, override=None):
@@ -146,42 +149,53 @@ def eigenpairs(A, k, sigma, factor=None, tol=1e-10):
     eigenvector for eigenvalues[j]. Pass A = W for right eigenvectors, A = W^T
     for the left eigenvectors of W."""
     E = SLEPc.EPS().create(comm=A.getComm())
-    E.setOperators(A)
-    E.setProblemType(SLEPc.EPS.ProblemType.NHEP)
-    E.setDimensions(k, max(2 * k, k + 10))
-    E.setTolerances(tol, max_it=1000)
-    E.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_MAGNITUDE)
-    E.setTarget(sigma)
-    st = E.getST()
-    st.setType("sinvert")
-    st.setShift(sigma)
-    ksp = st.getKSP()
-    ksp.setType("preonly")
-    pc = ksp.getPC()
-    pc.setType("lu")
-    pc.setFactorSolverType(factor or choose_factor(A))
-    E.setFromOptions()
-    E.solve()
+    try:
+        E.setOperators(A)
+        E.setProblemType(SLEPc.EPS.ProblemType.NHEP)
+        E.setDimensions(k, max(2 * k, k + 10))
+        E.setTolerances(tol, max_it=1000)
+        E.setWhichEigenpairs(SLEPc.EPS.Which.TARGET_MAGNITUDE)
+        E.setTarget(sigma)
+        st = E.getST()
+        st.setType("sinvert")
+        st.setShift(sigma)
+        ksp = st.getKSP()
+        ksp.setType("preonly")
+        pc = ksp.getPC()
+        pc.setType("lu")
+        pc.setFactorSolverType(factor or choose_factor(A))
+        E.setFromOptions()
+        E.solve()
 
-    nconv = E.getConverged()
-    if nconv < k:
-        raise RuntimeError(
-            f"SLEPc converged only {nconv}/{k} eigenpairs at sigma={sigma:.3g}; "
-            "raise --n-eigs/ncv or loosen the shift."
-        )
-    n = A.getSize()[0]
-    vals = np.empty(k, dtype=complex)
-    vecs = np.empty((n, k), dtype=complex)
-    vr = A.createVecRight()
-    vi = A.createVecRight()
-    for i in range(k):
-        vals[i] = E.getEigenpair(i, vr, vi)
-        vecs[:, i] = _gather(vr) + 1j * _gather(vi)
-    vr.destroy()
-    vi.destroy()
-    E.destroy()
-    order = np.argsort(-vals.real)
-    return vals[order], vecs[:, order]
+        nconv = E.getConverged()
+        if nconv < k:
+            raise RuntimeError(
+                f"SLEPc converged only {nconv}/{k} eigenpairs at sigma={sigma:.3g}; "
+                "raise --n-eigs/ncv or loosen the shift."
+            )
+        n = A.getSize()[0]
+        vals = np.empty(k, dtype=complex)
+        vecs = np.empty((n, k), dtype=complex)
+        vr = A.createVecRight()
+        vi = A.createVecRight()
+        try:
+            for i in range(k):
+                vals[i] = E.getEigenpair(i, vr, vi)
+                vecs[:, i] = _gather(vr) + 1j * _gather(vi)
+        finally:
+            vr.destroy()
+            vi.destroy()
+        order = np.argsort(-vals.real)
+        return vals[order], vecs[:, order]
+    finally:
+        # E owns the shift-invert LU factorization -- by far the largest
+        # allocation in this pipeline at large tile sizes. Any failure above
+        # (non-convergence, a solve error, ...) must still free it, or a
+        # sweep that tolerates per-beta failures (see
+        # coexistence.run_coexistence) leaks one factorization per failed
+        # beta instead of releasing it, and can OOM a node that would
+        # otherwise have had enough memory.
+        E.destroy()
 
 
 def stationary(W, sigma, factor=None):
@@ -199,9 +213,10 @@ def stationary(W, sigma, factor=None):
 def left_eigenpairs(W, k, sigma, factor=None):
     """The k slowest *left* eigenpairs of W (= eigenpairs of W^T)."""
     WT = W.transpose(PETSc.Mat())
-    vals, vecs = eigenpairs(WT, k, sigma, factor=factor)
-    WT.destroy()
-    return vals, vecs
+    try:
+        return eigenpairs(WT, k, sigma, factor=factor)
+    finally:
+        WT.destroy()
 
 
 def committor(W, in_A, in_B, factor=None):
@@ -222,32 +237,40 @@ def committor(W, in_A, in_B, factor=None):
         raise ValueError("both basins must be non-empty")
 
     WT = W.transpose(PETSc.Mat())          # backward generator W^T (full)
-    rstart, rend = WT.getOwnershipRange()
+    # Destroyed in reverse creation order in `finally`: the KSP's LU factor
+    # holds a reference to WT, so it must go before WT itself (freeing WT
+    # first leaves the PC pointing at released memory -- a segfault under the
+    # parallel direct solvers). Tracking creation order means any failure
+    # partway through (a bad solve, an OOM in the factorization, ...) still
+    # frees everything created so far instead of leaking it.
+    created = [WT]
+    try:
+        rstart, rend = WT.getOwnershipRange()
 
-    def _local(mask):
-        idx = np.where(mask)[0]
-        return idx[(idx >= rstart) & (idx < rend)].astype(PETSc.IntType)
+        def _local(mask):
+            idx = np.where(mask)[0]
+            return idx[(idx >= rstart) & (idx < rend)].astype(PETSc.IntType)
 
-    boundary = _local(in_A | in_B)
-    WT.zeroRows(boundary, diag=1.0)        # basin rows -> q_i = b_i
+        boundary = _local(in_A | in_B)
+        WT.zeroRows(boundary, diag=1.0)        # basin rows -> q_i = b_i
 
-    b = WT.createVecLeft()
-    b.set(0.0)
-    local_B = _local(in_B)
-    b.setValues(local_B, np.ones(len(local_B)))   # q = 1 on B, 0 on A/interior RHS
-    b.assemble()
+        b = WT.createVecLeft()
+        created.append(b)
+        b.set(0.0)
+        local_B = _local(in_B)
+        b.setValues(local_B, np.ones(len(local_B)))   # q = 1 on B, 0 on A/interior RHS
+        b.assemble()
 
-    q = WT.createVecRight()
-    ksp = _lu_ksp(WT, factor)
-    ksp.solve(b, q)
+        q = WT.createVecRight()
+        created.append(q)
+        ksp = _lu_ksp(WT, factor)
+        created.append(ksp)
+        ksp.solve(b, q)
 
-    out = _gather(q)
-    # Destroy the KSP (and its LU factor of WT) *before* WT itself: the factor
-    # holds a reference to WT, so freeing WT first leaves the PC pointing at
-    # released memory (a segfault under the parallel direct solvers).
-    for obj in (ksp, b, q, WT):
-        obj.destroy()
-    return out
+        return _gather(q)
+    finally:
+        for obj in reversed(created):
+            obj.destroy()
 
 
 def committor_backward(W, in_A, in_B, theta, factor=None):
@@ -264,26 +287,33 @@ def committor_backward(W, in_A, in_B, theta, factor=None):
             "steady state); found non-positive entries"
         )
     WT = W.transpose(PETSc.Mat())          # W^T
-    L = _scatter_in(WT, theta, left=True)  # diag(theta) on the left
-    R = _scatter_in(WT, 1.0 / theta)       # diag(1/theta) on the right
-    WT.diagonalScale(L, R)                 # WT <- D W^T D^{-1} = W* (reversed gen)
-    # committor takes the generator and transposes it internally, so pass W*.
-    q_minus = committor(WT, in_A=in_B, in_B=in_A, factor=factor)
-    WT.destroy()
-    L.destroy()
-    R.destroy()
-    return q_minus
+    created = [WT]
+    try:
+        L = _scatter_in(WT, theta, left=True)  # diag(theta) on the left
+        created.append(L)
+        R = _scatter_in(WT, 1.0 / theta)       # diag(1/theta) on the right
+        created.append(R)
+        WT.diagonalScale(L, R)                 # WT <- D W^T D^{-1} = W* (reversed gen)
+        # committor takes the generator and transposes it internally, so pass W*.
+        return committor(WT, in_A=in_B, in_B=in_A, factor=factor)
+    finally:
+        for obj in reversed(created):
+            obj.destroy()
 
 
 def reactive_flux(W, theta, core_A, q_plus):
     """TPT reactive flux F = sum_{i in A} pi_i (L q+)_i with L = W^T (the
     row-convention rate matrix), computed as a distributed matvec."""
     WT = W.transpose(PETSc.Mat())          # L_ij = rate i -> j
-    qp = _scatter_in(WT, q_plus)
-    Lq = WT.createVecLeft()
-    WT.mult(qp, Lq)
-    Lq_all = _gather(Lq)
-    WT.destroy()
-    qp.destroy()
-    Lq.destroy()
-    return float(theta[core_A] @ Lq_all[core_A])
+    created = [WT]
+    try:
+        qp = _scatter_in(WT, q_plus)
+        created.append(qp)
+        Lq = WT.createVecLeft()
+        created.append(Lq)
+        WT.mult(qp, Lq)
+        Lq_all = _gather(Lq)
+        return float(theta[core_A] @ Lq_all[core_A])
+    finally:
+        for obj in reversed(created):
+            obj.destroy()

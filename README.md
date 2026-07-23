@@ -69,13 +69,16 @@ Both `sweeps/linear.py` and `sweeps/mpi.py` run up to **three independent
 phases** and write their output files (default prefix `co_oxidation`):
 
 - **kMC sweep** (`--no-kmc` to skip) &rarr; `{out}_kmc_sweep.csv`: per-beta kMC
-  steady coverages from the empty and CO-covered starts. The ME-MKM steady
-  coverages (`memkm_empty/co/o`) and the basin-weight ratio `log10 pi(A)/pi(B)`
-  (`log_ratio`) are attached to the same file.
-- **ME-MKM coexistence** (`--no-memkm` to skip) &rarr; `{out}_coexistence.csv`:
-  for each beta\* where `log_ratio` changes sign (Brent-refined), the slow
+  steady coverages from the empty and CO-covered starts. When ME-MKM is on,
+  its steady coverages (`memkm_empty/co/o`) and the basin-weight ratio
+  `log10 pi(A)/pi(B)` (`log_ratio`) are attached to the same file.
+- **ME-MKM coexistence** (`--memkm`/`--no-memkm`; **off by default** in
+  `sweeps/linear.py` -- even a small tile is too slow for a laptop, **on by
+  default** in `sweeps/mpi.py`) &rarr; `{out}_coexistence.csv`: for each
+  beta\* where `log_ratio` changes sign (Brent-refined), the slow
   eigenvalues, the committor-based basin transition rates `k_AB`, `k_BA`, the
-  reactive flux, and two-state-kinetics diagnostics.
+  reactive flux, and two-state-kinetics diagnostics. Needs the
+  `native-petsc`+`native-slepc` or `source-petsc`+`source-slepc` extras.
 - **Mean field** (`--no-meanfield` to skip) &rarr; `{out}_meanfield.csv`: the
   MF-MK and Ea-MK steady-state branches, computed on a filled-in beta grid that
   still passes through every sweep beta (`--meanfield-beta-step` sets the

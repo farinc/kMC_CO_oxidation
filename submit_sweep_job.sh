@@ -12,6 +12,8 @@ module load petsc/3.25.3-real slepc/3.25.1-real openmpi/4.1.2
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 
+source .venv/bin/activate
+
 # The $@ syntax in Bash forwards all parameters to sweep.mpi
 #   qsub -N big_tile submit_sweep_job.sh --memkm-sites 12 --out big
-mpirun -np 24 uv run python -m sweeps.mpi "$@"
+mpirun -np 24 python -m sweeps.mpi "$@"
